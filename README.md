@@ -1,4 +1,4 @@
-# RONS one-shot WHYPE buyer
+# RONS WHYPE buyer and seller
 
 Buys RONS with WHYPE on Elysium (chain `99901`), on the verified RONS/WHYPE
 Uniswap V3-style pool. It buys either:
@@ -6,7 +6,7 @@ Uniswap V3-style pool. It buys either:
 - **immediately**, with `--buy-now`; or
 - **once**, with `--live`, when a large sell pushes the market cap below a threshold.
 
-It can also wrap and unwrap HYPE ⇄ WHYPE.
+It can also sell X% of the wallet's RONS immediately (`--sell-now`, or `--sell-loop` to stay running), and wrap and unwrap HYPE ⇄ WHYPE.
 
 Script: [`rons_buy_3.py`](rons_buy_3.py). With no mode flag it runs as a **dry run** and never signs anything.
 
@@ -40,9 +40,16 @@ python rons_buy_3.py --once
 python rons_buy_3.py --buy-now --keystore wallet.json --amount-hype 0.8
 # 6b. ... or arm the conditional buyer
 python rons_buy_3.py --live --keystore wallet.json --amount-hype 0.8
+
+# 7. Sell X% of your RONS now (deploy the seller once per wallet first)
+pip install py-solc-x
+python rons_buy_3.py --deploy-seller --keystore wallet.json
+python rons_buy_3.py --sell-now --keystore wallet.json --sell-pct 50
+# ... or stay running and sell each percent you type, with no startup delay
+python rons_buy_3.py --sell-loop --keystore wallet.json
 ```
 
-If you omit `--amount-hype`, the script asks for the amount.
+If you omit `--amount-hype` (or `--sell-pct`), the script asks for it.
 
 ## Modes
 
@@ -55,6 +62,9 @@ If you omit `--amount-hype`, the script asks for the amount.
 | `--deploy-router` | Yes | Deploys the bundled buyer contract. Run it once per wallet. |
 | `--prepare` | Yes | Wraps any WHYPE shortfall up to X, then approves exactly X to the buyer. |
 | `--buy-now` | Yes | Spends X WHYPE immediately. See [Buy now](#buy-now---buy-now). |
+| `--deploy-seller` | Yes | Compiles and deploys the bundled seller contract. Run it once per wallet. |
+| `--sell-now` | Yes | Sells X% of the wallet's RONS immediately. See [Sell now](#sell-now---sell-now). |
+| `--sell-loop` | Yes | Unlocks and verifies once, then sells each percent you type immediately. See [Sell loop](#sell-loop---sell-loop). |
 | `--live` | Yes | Buys X WHYPE **once**, when the [live trigger](#live-trigger---live) fires. |
 | `--wrap` | Yes | Wraps the **full** amount you enter, from native HYPE into WHYPE (1:1). |
 | `--unwrap-all` | Yes | Calls `withdraw()` on the wallet's **entire** WHYPE balance. |
@@ -64,8 +74,32 @@ Every mode that signs needs extra native HYPE in the wallet for gas.
 ### Buy now (`--buy-now`)
 
 - It does not check market cap, sells, or the USD price feed.
-- It still checks funds, allowance, gas, the deadline and the minimum output.
-- You can buy again by running a new command after the previous buy is confirmed.
+- It still checks funds, allowance, gas, the deadline (`--deadline-secs`) and the minimum output.
+- You can buy again by running a new command after the previous buy is confirmed, cancelled or dropped.
+
+### Sell now (`--sell-now`)
+
+- Sells `--sell-pct` percent (0.01–100, up to 2 decimals; a trailing `%` is accepted) of the RONS balance **at the moment of that sell**. `100` sells everything. Two sells of `50` leave 25%, not 0%.
+- **First sell only:** if the seller's RONS allowance is too low, it first sends a one-time **unlimited** `approve`, journaled like any other transaction. Every later sell is a single transaction. The seller can only pull tokens from whoever calls `sell()`, during that call, and it has no owner or sweep function. To revoke, approve 0 to the seller address in any wallet.
+- Like `--buy-now`, it does not check market cap, sells, or the USD price feed. It does check gas, the deadline (`--deadline-secs`) and the minimum WHYPE output (`--slippage-bps`).
+- The proceeds arrive as **WHYPE**. Run `--unwrap-all` to get native HYPE.
+- After a confirmed sell it prints the WHYPE received and the RONS left.
+- You can sell again by running a new command after the previous sell is confirmed, cancelled or dropped.
+
+### Sell loop (`--sell-loop`)
+
+- Skips the ~10 s startup on each sell: web3 import, keystore decryption (scrypt) and about 20 verification calls are done once.
+- Shows your RONS balance, asks `Phan tram RONS muon ban (Enter de thoat):` and sells that percent immediately. Enter or `q` quits.
+- A reverted, cancelled or dropped sell is journaled and the loop asks again. A sell whose outcome is still unknown (queued on the node) stops the loop.
+- It keeps the wallet lock while it runs, so no other run can use this wallet.
+
+### Speed
+
+A sell is now one transaction confirmed at a 1 gwei bid. Before these changes a sell was two transactions (approve + sell) at the node's ~0.2 gwei, and each waited 26–90 s for inclusion.
+
+- One-time unlimited approval (see above).
+- `--gas-gwei` (default 1, like wallets) is the minimum gas-price bid; it never exceeds `--max-gwei`. It applies to every transaction the script sends, buys included. Cost: about 0.00015 HYPE per transaction.
+- `--sell-loop` removes the startup cost.
 
 ### Wrap and unwrap
 
@@ -99,6 +133,7 @@ What the trigger does and does not see:
 - After a reconnect, a missed sell still counts only if it is at most 30 s old.
 - There is no mempool monitoring.
 - A fill is not guaranteed, and the market cap at inclusion is not guaranteed either, because the USD check is done off-chain.
+- `--live` is one-shot: once its journal (`rons_<wallet>.json`) exists, it refuses to arm again. The exception is a buy that was `replaced` or `dropped` (it never executed): that journal is archived and `--live` can be armed again.
 
 ## Options
 
@@ -107,9 +142,12 @@ What the trigger does and does not see:
 | `--rpc` | `https://rpc-live.boxa.club` | Can also be set with env `ELYSIUM_RPC`. |
 | `--rpc-backup` | `https://rpc.ronspad.fun` | Can also be set with env `ELYSIUM_RPC_BACKUP`. Pass `""` to disable. |
 | `--amount-hype` | *(prompt)* | An exact decimal with up to 18 places. Floats are never used. |
+| `--sell-pct` | *(prompt)* | With `--sell-now`: percent of the RONS balance, 0.01–100, up to 2 decimals. |
 | `--slippage-bps` | `100` (1%) | Range 1–300. |
+| `--deadline-secs` | `180` s | Swap deadline after the quote. Range 30–900. The script waits for the receipt until this deadline + 60 s. |
+| `--gas-gwei` | `1` | Minimum gas-price bid. The node suggests about 0.2 gwei, but transactions at that price waited 26–90 s for inclusion. Wallets pay about 1 gwei. The bid is the higher of the two. Must be ≤ `--max-gwei`. |
 | `--max-gwei` | `2` | Gas-price cap. |
-| `--poll` | `1` s | Minimum 0.2 s. |
+| `--poll` | `10` s | Live/dry-run polling interval. Minimum 0.2 s. |
 | `--max-event-age` | `30` s | Range 1–60. |
 | `--max-block-age` | `600` s | Range 10–3600. |
 | `--state-dir` | `./rons_state` | Location of the journals and lock files. |
@@ -131,14 +169,31 @@ What the trigger does and does not see:
 
 The script verifies the contract's runtime bytecode before every run.
 
+**Seller contract.** `--deploy-seller` compiles `SELLER_SOURCE` (the buyer's mirror: RONS in, WHYPE out) on your machine with solc 0.8.26, using the optimizer at 200 runs and `evmVersion` paris. It needs `pip install py-solc-x`, which downloads solc the first time it runs. It has the same properties as the buyer: no owner, no sweep, no fee. After deploying, the script checks the on-chain runtime bytecode against the compiled output and saves its hash in `rons_state/seller_v1_<wallet>.json`. Every sell checks the deployed code against that hash. Only `--deploy-seller` needs py-solc-x; `--sell-now` and `--sell-loop` do not.
+
 The v1 contract was fixed at 0.5 WHYPE and cannot take a custom amount. Deploy v2 once and approve v2. This factory differs from Stockium's.
 
 ## Safety and state
 
-- **Journal before broadcast:** every transaction is written to `rons_state/` before it is sent.
-- **Pending blocks further runs:** a journal left `pending` stops later runs until you check its tx hash and nonce.
-- **No automatic retries:** a reverted or uncertain transaction is never retried.
+- **Journal before broadcast:** every transaction is written to `rons_state/` as `pending` before it is sent, then updated with its final status.
+- **Pending journals are settled automatically.** If a send fails, the receipt wait times out, the run is interrupted, or you cancel/speed up the transaction in a wallet, the journal is checked against the chain. This happens right away when possible, and otherwise at the start of the next run (and before each sell in `--sell-loop`). You no longer need to edit or delete journals by hand.
+- **Only an order still queued on the node blocks further runs**, because it may still execute. Run again later; it is re-checked each time.
+- **No automatic retries:** a failed transaction is never re-sent. You start the next one yourself.
 - **Never delete `rons_state/` to force a retry.** Old journals also keep the conditional-purchase history across contract versions.
+
+### Journal statuses
+
+| Status | Meaning | Executed? | Blocks new runs? |
+|---|---|---|---|
+| `pending` | Sent; outcome not known yet, or still queued on the node. | Maybe | **Yes** |
+| `success` | Mined and succeeded. `block` is recorded. | Yes | No |
+| `reverted` | Mined but failed, e.g. slippage or expired deadline. Gas was spent. | No | No |
+| `replaced` | Its nonce was used by another transaction: a wallet **cancel** or speed-up, or a UI trade. It can never execute. | No | No |
+| `dropped` | Not mined, nonce unused, and the node no longer knows it: rejected or dropped. | No | No |
+
+`replaced` and `dropped` journals also get a `note` and a `resolved_at` time. For `dropped`, the next transaction reuses the same nonce, so even if the old one resurfaces, at most one of the two can execute.
+
+A deploy (`--deploy-router`, `--deploy-seller`) or `--live` buy that ends up `replaced` or `dropped` is archived as `<name>_<status>_<time>.json`, so you can retry it. A `reverted` deploy still needs a manual look before retrying.
 - **One process per wallet:** a file lock enforces this. Different wallets or state directories are not coordinated with each other.
 - Never share keys or keystore passwords.
 - Downloading the script does not start anything: it runs in dry-run mode until you pass a mode flag.
